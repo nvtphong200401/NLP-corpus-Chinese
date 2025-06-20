@@ -30,8 +30,7 @@ class DjvuCorpusExtractor:
         self.output_dir = Path(output_dir)
         self.metadata = {}
         self.chapters = []
-        
-        # Create output directory
+          # Create output directory
         self.output_dir.mkdir(exist_ok=True)
         
     def extract_metadata(self, content: str) -> Dict[str, str]:
@@ -100,8 +99,7 @@ class DjvuCorpusExtractor:
                     publisher_info.append(match.group(0))
         
         metadata['publisher'] = '; '.join(publisher_info) if publisher_info else '中华书局出版'
-        
-        # Extract publication date
+          # Extract publication date
         date_pattern = r'1993.*?年.*?月.*?第.*?版'
         date_match = re.search(date_pattern, content)
         if date_match:
@@ -114,16 +112,44 @@ class DjvuCorpusExtractor:
         
         return metadata
     
+    def extract_volume_from_content(self, content_lines: List[str], start_idx: int) -> Optional[int]:
+        """Extract the actual volume number from the content around the given index"""
+        # Look at the current line and nearby lines for 第X卷 pattern
+        search_range = range(max(0, start_idx - 2), min(len(content_lines), start_idx + 5))
+        
+        chinese_to_arabic = {
+            '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6,
+            '七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12,
+            '十三': 13, '十四': 14, '十五': 15, '十六': 16, '十七': 17, '十八': 18,
+            '十九': 19, '二十': 20
+        }
+        
+        for i in search_range:
+            line = content_lines[i].strip()
+            # Look for patterns like "第 X 卷" or "第X卷"
+            volume_match = re.search(r'第\s*([一二三四五六七八九十]+)\s*卷', line)
+            if volume_match:
+                volume_chinese = volume_match.group(1)
+                volume_num = chinese_to_arabic.get(volume_chinese)
+                if volume_num:
+                    return volume_num
+        
+        return None
+
     def find_content_start(self, lines: List[str]) -> int:
         """Find where the actual historical content starts"""
         for i, line in enumerate(lines):
             # Look for the start of the first volume
-            if '资治通鉴第一卷' in line or ('周纪一' in line and '威烈王' in line):
+            if '资治通鉴第一卷' in line:
                 return i
+            # Look for Chapter 1 header pattern - this is the key fix
+            if '第 一 卷' in line and '周 威 烈 王' in line:
+                return max(0, i - 2)  # Start a bit before to include volume header
             # Alternative pattern - look for volume headers
             if re.search(r'第.*卷.*周纪.*威烈王', line):
                 return i
-          # If we can't find the exact start, look for content patterns
+        
+        # If we can't find the exact start, look for content patterns
         for i, line in enumerate(lines):
             if re.search(r'周威烈王.*年.*公元前', line):
                 return max(0, i - 5)  # Start a few lines before
@@ -131,167 +157,194 @@ class DjvuCorpusExtractor:
         return len(lines) // 3  # Fallback: assume content starts after first third
     
     def extract_chapters(self, content: str) -> List[Dict]:
-        """Extract individual chapters/sections from the content"""
+        """Extract individual pages from chapters in the content"""
         lines = content.split('\n')
         content_start = self.find_content_start(lines)
         content_lines = lines[content_start:]
-        
-        chapters = []
-        
-        # Look for the 12 main volumes as mentioned in table of contents
-        # Pattern: 第X卷 followed by dynasty name (周纪, 秦纪, 汉纪)
-        volume_patterns = [
-            r'第\s*([一二三四五六七八九十]+)\s*卷\s*["""]?\s*(周纪[一二三四五六七八九十]*)',
-            r'第\s*([一二三四五六七八九十]+)\s*卷\s*["""]?\s*(秦纪[一二三四五六七八九十]*)',
-            r'第\s*([一二三四五六七八九十]+)\s*卷\s*["""]?\s*(汉纪[一二三四五六七八九十]*)'
+
+        chapters = []        # Enhanced patterns to capture both chapter and page information
+        # Pattern: page_number 第X卷 dynasty content (year)
+        page_patterns = [
+            # Pattern with page number at start: "218 第 十 卷 汉 高 帝 四 年 (前 203)"
+            r'(\d{1,3})\s+第\s*([一二三四五六七八九十]+)\s*卷\s+([^(]+)\s*\([^)]+\)',
+            # Alternative patterns
+            r'(\d{1,3})\s+第\s*([一二三四五六七八九十]+)\s*卷\s+([^0-9]+)',
+            r'第\s*([一二三四五六七八九十]+)\s*卷\s+([^(]+)\s*\([^)]+\)\s*(\d+)',
+            r'第\s*([一二三四五六七八九十]+)\s*卷\s+([^0-9]+)\s+(\d+)',
+            r'第\s*([一二三四五六七八九十]+)\s*卷\s*([^0-9]+)\s*(\d+)',
         ]
         
-        # Find main chapter boundaries
-        chapter_boundaries = []
+        # Convert Chinese numerals to Arabic
+        chinese_to_arabic = {
+            '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6,
+            '七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12
+        }
         
+        # Find page boundaries within chapters
+        page_boundaries = []
+        
+        # First, look for the special first chapter pattern
         for i, line in enumerate(content_lines):
-            for pattern in volume_patterns:
-                match = re.search(pattern, line)
-                if match:
-                    volume_num = match.group(1)
-                    dynasty_era = match.group(2)
-                    
-                    # Convert Chinese numerals to Arabic
-                    chinese_to_arabic = {
-                        '一': 1, '二': 2, '三': 3, '四': 4, '五': 5, '六': 6,
-                        '七': 7, '八': 8, '九': 9, '十': 10, '十一': 11, '十二': 12
-                    }
-                    
-                    chapter_num = chinese_to_arabic.get(volume_num, len(chapter_boundaries) + 1)
-                    
-                    # Extract page number if present in the line or nearby lines
-                    page_num = ""
-                    # Look for page numbers in current and surrounding lines
-                    search_lines = content_lines[max(0, i-2):i+3]
-                    for search_line in search_lines:
-                        page_match = re.search(r'(\d+)', search_line)
-                        if page_match and len(page_match.group(1)) <= 3:  # Reasonable page number
+            line_clean = line.strip()
+            if len(line_clean) < 5:
+                continue
+                
+            # Special handling for Chapter 1
+            if '资治通鉴第一卷' in line_clean:
+                # Look for the next few lines for the actual chapter header
+                for j in range(i, min(i + 5, len(content_lines))):
+                    next_line = content_lines[j].strip()
+                    if '周纪一' in next_line and '威烈王' in next_line:
+                        # Extract year information
+                        year_match = re.search(r'前\s*(\d+)', next_line)
+                        page_match = re.search(r'(\d+)', next_line)
+                        
+                        page_num = "1"  # Default for first chapter
+                        if page_match:
                             page_num = page_match.group(1)
-                            break
+                        
+                        page_boundaries.append({
+                            'start_idx': i,
+                            'chapter_num': 1,
+                            'page_num': page_num,
+                            'title': '周纪一_威烈王二十三年',
+                            'dynasty': '周纪',
+                            'full_title': next_line
+                        })
+                        break
+                break
+        
+        # Then look for regular patterns
+        for i, line in enumerate(content_lines):
+            line_clean = line.strip()            # Skip very short lines that are unlikely to be headers
+            if len(line_clean) < 10:
+                continue
+                
+            for pattern in page_patterns:
+                match = re.search(pattern, line_clean)
+                if match:
+                    # Handle different pattern groups
+                    if pattern.startswith(r'(\d{1,3})'):  # Pattern with page number first
+                        page_num = match.group(1)
+                        volume_num = match.group(2)
+                        content_desc = match.group(3).strip()
+                    else:  # Traditional patterns with page number last
+                        volume_num = match.group(1)
+                        content_desc = match.group(2).strip()
+                        page_num = match.group(3)
                     
-                    if not page_num:
-                        page_num = str(i + 1)  # Fallback to line number
+                    # Convert Chinese volume number to Arabic for chapter numbering
+                    chapter_num = chinese_to_arabic.get(volume_num, len(page_boundaries) + 1)
                     
-                    chapter_boundaries.append({
+                    # Extract the actual volume number from the content around this line
+                    # Look at the actual content to find 第X卷 pattern
+                    actual_volume_num = self.extract_volume_from_content(content_lines, i)
+                    if actual_volume_num:
+                        chapter_num = actual_volume_num
+                    
+                    # Skip if we already have this chapter/page
+                    if any(pb['chapter_num'] == chapter_num and pb['page_num'] == page_num for pb in page_boundaries):
+                        continue
+                    
+                    # Clean up content description for title
+                    title = content_desc.strip()
+                    title = re.sub(r'\s+', '_', title)
+                    title = re.sub(r'["""\[\]()（）]', '', title)
+                    
+                    # Extract dynasty info (周纪, 秦纪, 汉纪)
+                    dynasty = ""
+                    if '周' in title or chapter_num <= 5:
+                        dynasty = "周纪"
+                    elif '秦' in title or 6 <= chapter_num <= 8:
+                        dynasty = "秦纪" 
+                    elif '汉' in title or chapter_num >= 9:
+                        dynasty = "汉纪"
+                    else:
+                        dynasty = "未知朝代"
+                    
+                    page_boundaries.append({
                         'start_idx': i,
                         'chapter_num': chapter_num,
-                        'title': dynasty_era,
                         'page_num': page_num,
-                        'full_title': line.strip()
+                        'title': title,
+                        'dynasty': dynasty,
+                        'full_title': line_clean
                     })
                     break
-        
         # If we found fewer than expected, look for simpler patterns
-        if len(chapter_boundaries) < 8:
-            logger.warning(f"Only found {len(chapter_boundaries)} main chapters, looking for simpler patterns")
+        if len(page_boundaries) < 10:
+            logger.warning(f"Only found {len(page_boundaries)} page boundaries, looking for simpler patterns")
             
-            # Look for dynasty era markers without volume numbers
+            # Look for lines that might contain volume and page info
             simple_patterns = [
-                r'(周纪[一二三四五六七八九十]*)',
-                r'(秦纪[一二三四五六七八九十]*)',
-                r'(汉纪[一二三四五六七八九十]*)'
+                r'第\s*([一二三四五六七八九十]+)\s*卷.*?(\d{1,3})',
+                r'(周|秦|汉).*?(\d{1,3})',
             ]
             
             for i, line in enumerate(content_lines):
+                line_clean = line.strip()
+                if len(line_clean) < 10 or len(line_clean) > 200:  # Skip very long or short lines
+                    continue
+                    
                 for pattern in simple_patterns:
-                    match = re.search(pattern, line)
-                    if match and len(line.strip()) < 100:  # Likely a chapter header
-                        dynasty_era = match.group(1)
+                    match = re.search(pattern, line_clean)
+                    if match:
+                        if '第' in match.group(0):
+                            volume_num = match.group(1)
+                            page_num = match.group(2)
+                            chapter_num = chinese_to_arabic.get(volume_num, len(page_boundaries) + 1)
+                        else:
+                            page_num = match.group(2)
+                            chapter_num = len(page_boundaries) + 1
                         
                         # Avoid duplicates
-                        if not any(cb['title'] == dynasty_era for cb in chapter_boundaries):
-                            # Extract page number
-                            page_num = ""
-                            search_lines = content_lines[max(0, i-2):i+3]
-                            for search_line in search_lines:
-                                page_match = re.search(r'(\d+)', search_line)
-                                if page_match and len(page_match.group(1)) <= 3:
-                                    page_num = page_match.group(1)
-                                    break
+                        if not any(pb['start_idx'] == i for pb in page_boundaries):
+                            dynasty = "周纪" if '周' in line_clean else "秦纪" if '秦' in line_clean else "汉纪"
+                            title = line_clean[:50].replace(' ', '_')
                             
-                            if not page_num:
-                                page_num = str(len(chapter_boundaries) + 1)
-                            
-                            chapter_boundaries.append({
+                            page_boundaries.append({
                                 'start_idx': i,
-                                'chapter_num': len(chapter_boundaries) + 1,
-                                'title': dynasty_era,
+                                'chapter_num': chapter_num,
                                 'page_num': page_num,
-                                'full_title': line.strip()
+                                'title': title,
+                                'dynasty': dynasty,
+                                'full_title': line_clean
                             })
-                        break
+                        break        # Sort by page number to maintain book order, but keep original volume-based chapter numbers
+        page_boundaries.sort(key=lambda x: int(x['page_num']))
         
-        # Sort by start index
-        chapter_boundaries.sort(key=lambda x: x['start_idx'])
-        
-        # Extract chapter content
-        for i, boundary in enumerate(chapter_boundaries):
+        # Extract content for each page/section
+        for i, boundary in enumerate(page_boundaries):
             start_idx = boundary['start_idx']
-            end_idx = chapter_boundaries[i + 1]['start_idx'] if i + 1 < len(chapter_boundaries) else len(content_lines)
+            end_idx = page_boundaries[i + 1]['start_idx'] if i + 1 < len(page_boundaries) else len(content_lines)
             
-            chapter_lines = content_lines[start_idx:end_idx]
-            chapter_text = '\n'.join(chapter_lines).strip()
+            section_lines = content_lines[start_idx:end_idx]
+            section_text = '\n'.join(section_lines).strip()
             
-            if len(chapter_text) < 500:  # Skip very short sections
+            if len(section_text) < 100:  # Skip very short sections
                 continue
             
-            # Extract time period if available
-            period = ""
-            period_match = re.search(r'前\s*\d+.*?年', chapter_text[:300])
-            if period_match:
-                period = period_match.group(0)
+            # Clean up title for filename
+            cleaned_title = boundary['title'].replace(' ', '_')
+            cleaned_title = re.sub(r'[^\w\u4e00-\u9fff_]', '_', cleaned_title)
+            cleaned_title = cleaned_title[:50]  # Limit length
+            
+            # Determine correct dynasty based on volume number
+            dynasty = self.get_dynasty_by_volume(boundary['chapter_num'], boundary['title'])
             
             chapter_info = {
                 'index': boundary['chapter_num'],
                 'page_num': boundary['page_num'],
-                'title': boundary['title'],
-                'period': period,
-                'content': chapter_text,
-                'length': len(chapter_text),
+                'title': cleaned_title,
+                'dynasty': dynasty,
+                'content': section_text,
+                'length': len(section_text),
                 'full_title': boundary['full_title']
             }
             
             chapters.append(chapter_info)
         
-        # If still no good chapters found, create based on content division
-        if len(chapters) < 6:
-            logger.warning("Creating chapters based on content division as fallback")
-            section_size = len(content_lines) // 12  # Target 12 chapters
-            
-            chapters = []
-            chapter_names = [
-                "周纪一", "周纪二", "周纪三", "周纪四", "周纪五",
-                "秦纪一", "秦纪二", "秦纪三",
-                "汉纪一", "汉纪二", "汉纪三", "汉纪四"
-            ]
-            
-            for i in range(12):
-                start_idx = i * section_size
-                end_idx = min((i + 1) * section_size, len(content_lines))
-                
-                chapter_lines = content_lines[start_idx:end_idx]
-                chapter_text = '\n'.join(chapter_lines).strip()
-                
-                if len(chapter_text) < 100:
-                    continue
-                
-                chapter_info = {
-                    'index': i + 1,
-                    'page_num': str((i * 20) + 1),  # Estimated page numbers
-                    'title': chapter_names[i] if i < len(chapter_names) else f"第{i+1}章",
-                    'period': f"第{i+1}册内容",
-                    'content': chapter_text,
-                    'length': len(chapter_text),
-                    'full_title': chapter_names[i] if i < len(chapter_names) else f"第{i+1}章"
-                }
-                
-                chapters.append(chapter_info)
-        
+        logger.info(f"Extracted {len(chapters)} pages across chapters")
         return chapters
     
     def clean_text(self, text: str) -> str:
@@ -301,7 +354,8 @@ class DjvuCorpusExtractor:
         
         # Remove page numbers and other artifacts
         text = re.sub(r'\(\d+\)', '', text)
-        text = re.sub(r'第.*?页', '', text)        
+        text = re.sub(r'第.*?页', '', text)
+        
         # Clean up punctuation
         text = re.sub(r'\s*([，。；：！？])\s*', r'\1', text)
         
@@ -325,40 +379,17 @@ class DjvuCorpusExtractor:
         # Remove any invalid filename characters
         title = re.sub(r'[<>:"/\\|?*]', '_', title)
         title = re.sub(r'\s+', '_', title)
+        title = re.sub(r'[（）()]', '', title)  # Remove parentheses
+        title = re.sub(r'第.*?卷', '', title)  # Remove volume prefix
+        title = title.strip('_')
+          # Ensure title is not too long
+        if len(title) > 30:
+            title = title[:30]
+        
+        # Remove trailing underscores
+        title = title.strip('_')
         
         filename = f"{page_num}_{chapter_num}_{title}.txt"
-        
-        return filename
-        chapter_title = chapter_info['title']
-        
-        # Extract meaningful title from the chapter content
-        # Look for patterns like "周纪一", "汉纪三", etc.
-        title_patterns = [
-            r'(周纪[一二三四五六七八九十]+)',
-            r'(秦纪[一二三四五六七八九十]+)', 
-            r'(汉纪[一二三四五六七八九十]+)',
-            r'第.*?卷.*?(周纪.*?)[\s""]',
-            r'第.*?卷.*?(秦纪.*?)[\s""]',
-            r'第.*?卷.*?(汉纪.*?)[\s""]'
-        ]
-        
-        clean_title = ""
-        for pattern in title_patterns:
-            match = re.search(pattern, chapter_title)
-            if match:
-                clean_title = match.group(1)
-                break
-        
-        # If no pattern found, use a cleaned version of the title
-        if not clean_title:
-            clean_title = re.sub(r'[^\w\u4e00-\u9fff]', '', chapter_title[:20])
-            if not clean_title:
-                clean_title = f"章节{chapter_num}"
-        
-        # Remove any remaining invalid filename characters
-        clean_title = re.sub(r'[<>:"/\\|?*]', '_', clean_title)
-        
-        filename = f"{chapter_num}_{clean_title}.txt"
         
         return filename
     
@@ -368,16 +399,16 @@ class DjvuCorpusExtractor:
         filepath = self.output_dir / filename
         
         # Prepare content with metadata header
-        content_parts = []
-        
-        # Add metadata header
+        content_parts = []        # Add metadata header
         content_parts.append("=" * 50)
         content_parts.append("文档元数据 (Document Metadata)")
         content_parts.append("=" * 50)
         content_parts.append(f"标题: {metadata.get('title', 'N/A')}")
-        content_parts.append(f"卷册: {metadata.get('volume', 'N/A')}")
+        content_parts.append(f"卷册: {self.get_volume_by_chapter(chapter_info['index'])}")
+        content_parts.append(f"章节: 第{chapter_info['index']:02d}章")
+        content_parts.append(f"页码: {chapter_info['page_num']}")
         content_parts.append(f"时期: {metadata.get('period', 'N/A')}")
-        content_parts.append(f"章节: {chapter_info['title']}")
+        content_parts.append(f"章节标题: {chapter_info['title']}")
         content_parts.append(f"编者: {metadata.get('editors', 'N/A')}")
         content_parts.append(f"出版社: {metadata.get('publisher', 'N/A')}")
         content_parts.append(f"出版日期: {metadata.get('publication_date', 'N/A')}")
@@ -481,6 +512,43 @@ class DjvuCorpusExtractor:
         except Exception as e:
             logger.error(f"Error during corpus extraction: {e}")
             return False
+
+    def get_dynasty_by_volume(self, volume_num: int, title: str) -> str:
+        """Determine dynasty based on volume number and content analysis"""
+        # Clean up title for analysis
+        title_clean = title.lower()
+        
+        # First, check explicit dynasty markers in the title
+        if '周' in title or '威烈王' in title or '显王' in title or '慎靓王' in title:
+            return "周纪"
+        elif '秦' in title or '始皇' in title or '二世' in title:
+            return "秦纪"
+        elif '汉' in title or '高帝' in title or '惠帝' in title:
+            return "汉纪"
+        
+        # Based on the typical structure of 资治通鉴:
+        # Volumes 1-5: Zhou periods (周纪)
+        # Volumes 6-8: Qin period (秦纪) 
+        # Volumes 9+: Han period (汉纪)
+        
+        if volume_num <= 5:            return "周纪"
+        elif volume_num <= 8:
+            return "秦纪" 
+        else:
+            return "汉纪"
+    
+    def get_volume_by_chapter(self, chapter_num: int) -> str:
+        """Determine the correct volume number based on the actual chapter/volume number"""
+        # Since we're now using the original volume numbers from the content,
+        # chapter_num already represents the correct volume number
+        
+        chinese_nums = ['一', '二', '三', '四', '五', '六', '七', '八', '九', '十', 
+                       '十一', '十二', '十三', '十四', '十五', '十六', '十七', '十八', '十九', '二十']
+        
+        if chapter_num <= len(chinese_nums):
+            return f"第{chinese_nums[chapter_num-1]}卷"
+        else:
+            return f"第{chapter_num}卷"
 
 def main():
     """Main execution function"""
